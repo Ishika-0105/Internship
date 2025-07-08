@@ -30,32 +30,38 @@ from config import Config
 # --------------------------------------------------------------------------- #
  
 class AgentState(dict):
-    """
-    Workflow state dictionary.  Using plain dict avoids attribute errors
-    seen when mixing dataclass with MessagesState.
-    """
- 
-    DEFAULT: Dict[str, Any] = {
+    """Workflow state dictionary"""
+    
+    DEFAULT_STATE = {
         "query": "",
-        "documents": [],             # list[Dict]
+        "documents": [],
         "analysis_response": "",
-        "chart_data": None,          # dict|None
-        "chart_image": None,         # base64 str|None
-        "report_path": None,         # str|None
+        "chart_data": None,
+        "chart_image": None,
+        "report_path": None,
         "supervisor_decision": "",
         "next_agent": "",
         "final_response": "",
-        "metadata": {},              # dict
-        "error": None,               # str|None
-        "messages": []               # required by MessagesState
+        "metadata": {},
+        "error": None,
+        "messages": []
     }
- 
+    
     def __init__(self, **kwargs):
-        super().__init__(self.DEFAULT | kwargs)
- 
-    # convenience wrappers
-    def get_safe(self, key: str, default: Any = None) -> Any:
-        return self.get(key, default)
+        # Start with default state
+        super().__init__(self.DEFAULT_STATE)
+        # Update with any provided values
+        self.update(**kwargs)
+    
+    def update(self, **kwargs) -> None:
+        """Update state with new values"""
+        for key, value in kwargs.items():
+            if key in self.DEFAULT_STATE:
+                self[key] = value
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Safe get with default value"""
+        return super().get(key, default)
  
 # --------------------------------------------------------------------------- #
 # 2.  Financial Tools                                                         #
@@ -317,129 +323,274 @@ class MultiAgentFinancialRAG:
     #  Workflow Graph                                                       #
     # --------------------------------------------------------------------- #
     def _create_workflow(self) -> StateGraph:
-        sg = StateGraph(AgentState)
- 
-        # ---------- Supervisor Node ----------
-        def supervisor_node(state: AgentState):
-            chain = self.supervisor.create_supervisor_chain()
-            decision: RouterModel = chain.invoke({
-                "query": state["query"],
-                "state": self._format_state(state)
-            })
-            state["supervisor_decision"] = decision["reasoning"]
-            state["next_agent"] = decision["next"]
-            return state
- 
-        # ---------- Document Query Node ----------
-        def document_query_node(state: AgentState):
+        workflow = StateGraph(AgentState)
+        
+        def supervisor_node(state: Dict) -> Dict:
+            """Supervisor node with safe state handling"""
             try:
+                # Ensure we have a proper state dictionary
+                current_state = AgentState(**state) if not isinstance(state, AgentState) else state
+                
+                # Ensure query exists
+                if not current_state.get("query"):
+                    return {
+                        **current_state,
+                        "error": "No query provided",
+                        "next_agent": "FINISH"
+                    }
+                
+                try:
+                    chain = self.supervisor.create_supervisor_chain()
+                    decision = chain.invoke({
+                        "query": current_state["query"],
+                        "state": self._format_state(current_state)
+                    })
+                    
+                    return {
+                        **current_state,
+                        "supervisor_decision": decision.get("reasoning", ""),
+                        "next_agent": decision.get("next", "FINISH")
+                    }
+                except Exception as e:
+                    return {
+                        **current_state,
+                        "error": f"Supervisor error: {str(e)}",
+                        "next_agent": "FINISH"
+                    }
+            except Exception as e:
+                # Return valid state even on error
+                return AgentState(
+                    error=f"Critical supervisor error: {str(e)}",
+                    next_agent="FINISH"
+                )
+        # ---------- Document Query Node ----------
+        def document_query_node(state: dict) -> dict:
+            try:
+                # Convert to AgentState if needed
+                if not isinstance(state, AgentState):
+                    state = AgentState(**state)
+                
+                query = state.get('query', '')
+                if not query:
+                    state['error'] = "No query provided to document query"
+                    return dict(state)
+                
                 doc_out = retrieve_financial_documents.invoke({
-                    "query": state["query"],
+                    "query": query,
                     "vector_store": self.vector_store
                 })
-                context = doc_out.get("context", "")
+                
+                if doc_out.get('error'):
+                    state['error'] = doc_out['error']
+                    return dict(state)
+                
+                context = doc_out.get('context', '')
+                
                 analysis = analyze_financial_data.invoke({
                     "context": context,
-                    "query": state["query"]
+                    "query": query
                 })
-                state["documents"] = doc_out.get("documents", [])
-                state["metadata"]["analysis"] = analysis
-                return state
-            except Exception as exc:
-                state["error"] = f"DocQuery error: {exc}"
-                return state
- 
+                
+                # Update state
+                state['documents'] = doc_out.get('documents', [])
+                state['metadata'] = state.get('metadata', {})
+                state['metadata']['analysis'] = analysis
+                state['metadata']['sources'] = doc_out.get('sources', [])
+                
+                return dict(state)
+                
+            except Exception as e:
+                return {
+                    'query': state.get('query', ''),
+                    'error': f"Document query error: {str(e)}",
+                    'documents': [],
+                    'metadata': {},
+                    'messages': []
+                }
+
         # ---------- Chart Generation Node ----------
-        def chart_generation_node(state: AgentState):
+        def chart_generation_node(state: dict) -> dict:
             try:
-                analysis = state["metadata"].get("analysis", {})
-                cdata = generate_chart_data.invoke({
+                # Convert to AgentState if needed
+                if not isinstance(state, AgentState):
+                    state = AgentState(**state)
+                
+                metadata = state.get('metadata', {})
+                analysis = metadata.get('analysis', {})
+                
+                chart_data = generate_chart_data.invoke({
                     "analysis": analysis,
                     "chart_type": "auto"
                 })
-                cimg  = create_financial_chart.invoke({"chart_data": cdata})
-                state["chart_data"]  = cdata
-                state["chart_image"] = cimg
-                return state
-            except Exception as exc:
-                state["error"] = f"ChartGen error: {exc}"
-                return state
- 
+                
+                if not chart_data.get('error'):
+                    chart_image = create_financial_chart.invoke({
+                        "chart_data": chart_data
+                    })
+                    state['chart_data'] = chart_data
+                    state['chart_image'] = chart_image
+                else:
+                    state['error'] = chart_data['error']
+                
+                return dict(state)
+                
+            except Exception as e:
+                return {
+                    'query': state.get('query', ''),
+                    'error': f"Chart generation error: {str(e)}",
+                    'chart_data': None,
+                    'chart_image': None,
+                    'metadata': state.get('metadata', {}),
+                    'messages': []
+                }
+
         # ---------- Report Generation Node ----------
-        def report_generation_node(state: AgentState):
+        def report_generation_node(state: dict) -> dict:
             try:
-                analysis = state["metadata"].get("analysis", {})
-                pdf = generate_financial_report.invoke({
+                # Convert to AgentState if needed
+                if not isinstance(state, AgentState):
+                    state = AgentState(**state)
+                
+                metadata = state.get('metadata', {})
+                analysis = metadata.get('analysis', {})
+                
+                report_path = generate_financial_report.invoke({
                     "analysis": analysis,
-                    "chart_base64": state["chart_image"],
-                    "query": state["query"]
+                    "chart_base64": state.get('chart_image', ''),
+                    "query": state.get('query', '')
                 })
-                state["report_path"] = pdf
-                return state
-            except Exception as exc:
-                state["error"] = f"ReportGen error: {exc}"
-                return state
- 
+                
+                if not report_path.startswith('Error'):
+                    state['report_path'] = report_path
+                else:
+                    state['error'] = report_path
+                
+                return dict(state)
+                
+            except Exception as e:
+                return {
+                    'query': state.get('query', ''),
+                    'error': f"Report generation error: {str(e)}",
+                    'report_path': None,
+                    'metadata': state.get('metadata', {}),
+                    'messages': []
+                }
+
         # ---------- Final Response Node ----------
-        def final_response_node(state: AgentState):
+        def final_response_node(state: dict) -> dict:
             try:
+                # Convert to AgentState if needed
+                if not isinstance(state, AgentState):
+                    state = AgentState(**state)
+                
+                if state.get('error'):
+                    state['final_response'] = f"Error occurred: {state['error']}"
+                    return dict(state)
+                
                 summary_prompt = ChatPromptTemplate.from_messages([
                     ("system", "Write a concise business summary."),
                     ("human", "Query: {query}\nMetrics: {metrics}\n")
                 ])
-                analysis = state["metadata"].get("analysis", {})
-                resp = (summary_prompt | self.llm).invoke({
-                    "query": state["query"],
+                
+                metadata = state.get('metadata', {})
+                analysis = metadata.get('analysis', {})
+                
+                response = summary_prompt.invoke({
+                    "query": state.get('query', ''),
                     "metrics": json.dumps(analysis)
                 })
-                state["final_response"] = resp.content if hasattr(resp, "content") else str(resp)
-                return state
-            except Exception as exc:
-                state["error"] = f"FinalResp error: {exc}"
-                return state
- 
-        # ---- register nodes
+                
+                state['final_response'] = response.content if hasattr(response, 'content') else str(response)
+                
+                return dict(state)
+                
+            except Exception as e:
+                return {
+                    'query': state.get('query', ''),
+                    'error': f"Final response error: {str(e)}",
+                    'final_response': "An error occurred while generating the response.",
+                    'metadata': state.get('metadata', {}),
+                    'messages': []
+                }
+
+        # Register nodes and edges (rest remains the same)
         sg.add_node("supervisor", supervisor_node)
         sg.add_node("document_query", document_query_node)
         sg.add_node("chart_generation", chart_generation_node)
         sg.add_node("report_generation", report_generation_node)
         sg.add_node("final_response", final_response_node)
         sg.add_node("finish", lambda s: s)
- 
-        # ---- edges
+
+        # Add edges
         sg.add_edge(START, "supervisor")
- 
-        def choose_next(state: AgentState):
-            nxt = state.get("next_agent", "FINISH")
+    
+    async def process_query(self, query: str) -> Dict[str, Any]:
+        """Process a query through the workflow"""
+        try:
+            # Create initial state with query
+            initial_state = AgentState(query=query)
+            
+            # Set up config
+            config = {
+                "configurable": {
+                    "thread_id": str(uuid.uuid4()),
+                    "checkpoint_ns": int(time.time() * 1e9)
+                }
+            }
+            
+            # Run workflow
+            final_state = None
+            async for state in self.workflow.astream(initial_state, config=config):
+                if state:
+                    final_state = state
+            
+            # Ensure we return a valid state
+            if not final_state:
+                return AgentState(
+                    error="No result from workflow",
+                    query=query
+                )
+            
+            return final_state
+            
+        except Exception as e:
+            return AgentState(
+                error=f"Workflow error: {str(e)}",
+                query=query
+            )
+            
+        def choose_next(state: dict) -> str:
+            state = AgentState(**state) if not isinstance(state, AgentState) else state
+            next_agent = state.get('next_agent', 'FINISH')
             return {
                 "DocumentQuery": "document_query",
                 "ChartGeneration": "chart_generation",
                 "ReportGeneration": "report_generation",
                 "FINISH": "final_response"
-            }.get(nxt, "final_response")
- 
+            }.get(next_agent, "final_response")
+
         sg.add_conditional_edges("supervisor", choose_next)
         sg.add_edge("document_query", "supervisor")
         sg.add_edge("chart_generation", "supervisor")
         sg.add_edge("report_generation", "supervisor")
         sg.add_edge("final_response", END)
- 
-        # checkpoint memory
+
         return sg.compile(checkpointer=MemorySaver())
- 
-    # --------------------------------------------------------------------- #
-    #  Helpers                                                               #
-    # --------------------------------------------------------------------- #
+
     @staticmethod
-    def _format_state(state: AgentState) -> str:
+    def _format_state(state: dict) -> str:
+        """Format state for supervisor, with safe access"""
+        if not isinstance(state, (dict, AgentState)):
+            return "invalid state"
+            
         parts = []
-        if state["documents"]:
+        if state.get('documents'):
             parts.append("documents retrieved")
-        if state["metadata"].get("analysis"):
+        if state.get('metadata', {}).get('analysis'):
             parts.append("analysis ready")
-        if state.get("chart_data"):
+        if state.get('chart_data'):
             parts.append("chart built")
-        if state.get("report_path"):
+        if state.get('report_path'):
             parts.append("report built")
         return ", ".join(parts) or "none yet"
  
