@@ -580,7 +580,6 @@ def display_agent_progress(progress_steps):
                 <strong>{status_icon} {step['agent']}:</strong> {step['description']}
             </div>
             """, unsafe_allow_html=True)
-
 def process_single_agent_question(user_input: str):
     """Process user question using single agent mode"""
     st.session_state.processing_question = True
@@ -649,7 +648,38 @@ def process_single_agent_question(user_input: str):
         st.session_state.processing_question = False
         st.rerun()
 
-# 3. Replace the process_multi_agent_question function (missing from your code)
+async def run_multi_agent_query(user_input: str):
+    """Async function to run multi-agent query"""
+    try:
+        # Create initial state
+        initial_state = AgentState(query=user_input)
+        
+        # Set up config
+        config = {
+            "configurable": {
+                "thread_id": f"streamlit_{int(time.time())}",
+                "checkpoint_ns": int(time.time() * 1e9)
+            }
+        }
+        
+        # Run workflow
+        final_result = None
+        async for chunk in st.session_state.multi_agent_system.workflow.astream(
+            initial_state, 
+            config=config
+        ):
+            if chunk:
+                # Convert chunk to AgentState if needed
+                if isinstance(chunk, dict):
+                    final_result = AgentState(**chunk)
+                else:
+                    final_result = chunk
+        
+        return final_result or AgentState(error="No response from workflow")
+        
+    except Exception as e:
+        return AgentState(error=f"Workflow error: {str(e)}")
+
 def process_multi_agent_question(user_input: str):
     """Process user question using multi-agent system"""
     st.session_state.processing_question = True
@@ -658,133 +688,50 @@ def process_multi_agent_question(user_input: str):
         # Add user message to chat memory
         st.session_state.chat_memory.add_message('user', user_input)
         
-        # Check if multi-agent system is initialized
+        # Check multi-agent system
         if not st.session_state.multi_agent_system:
-            st.error("❌ Multi-agent system not initialized. Please switch to single agent mode.")
+            st.error("❌ Multi-agent system not initialized")
             return
 
-        with st.spinner("🤖 Multi-agent system processing your request..."):
-            # Run the async process_query in a new event loop
-            async def run_query():
-                # Initialize state
-                initial_state = AgentState(
-                    query=user_input,
-                    documents=[],
-                    analysis_response="",
-                    chart_data=None,
-                    chart_image=None,
-                    report_path=None,
-                    supervisor_decision="",
-                    next_agent="",
-                    final_response="",
-                    metadata={}
+        with st.spinner("🤖 Multi-agent system processing..."):
+            # Run query
+            result = asyncio.run(run_multi_agent_query(user_input))
+            
+            # Handle result
+            if result.get('error'):
+                st.error(f"❌ {result['error']}")
+                st.session_state.chat_memory.add_message(
+                    'assistant',
+                    f"I encountered an error: {result['error']}"
                 )
-                
-                # Create configuration for checkpointer
-                config = {
-                    "configurable": {
-                        "thread_id": "streamlit_session",
-                        "checkpoint_ns": int(time.time() * 1e9),
-                        "checkpoint_id": f"streamlit_{int(time.time())}"
-                    }
-                }
-                
-                # Run the workflow asynchronously with proper config
-                final_result = None
-                async for chunk in st.session_state.multi_agent_system.workflow.astream(
-                    initial_state, 
-                    config=config
-                ):
-                    if chunk:
-                        # Handle both dict and AgentState objects
-                        if isinstance(chunk, dict):
-                            # Extract the actual state from the chunk
-                            # LangGraph often returns chunks like {'node_name': state}
-                            for key, value in chunk.items():
-                                if isinstance(value, AgentState):
-                                    final_result = value
-                                elif isinstance(value, dict):
-                                    # If it's a dict, try to convert or merge with existing state
-                                    if final_result is None:
-                                        final_result = AgentState(**value) if all(hasattr(AgentState, k) for k in value.keys()) else value
-                                    else:
-                                        # Update existing state
-                                        for k, v in value.items():
-                                            if hasattr(final_result, k):
-                                                setattr(final_result, k, v)
-                        elif isinstance(chunk, AgentState):
-                            final_result = chunk
-                        else:
-                            # Handle other types
-                            final_result = chunk
-                
-                return final_result or {"error": "No response received from workflow"}
-            
-            # Run the async function
-            result = asyncio.run(run_query())
-            
-            # Debug: Print the result type and content
-            print(f"Result type: {type(result)}")
-            print(f"Result keys: {result.keys() if hasattr(result, 'keys') else 'No keys method'}")
-         
-            # Handle the result - check if it's AgentState or dict
-            if isinstance(result, AgentState):
-                # It's an AgentState object
-                if result.error:
-                    error_msg = result.error
-                    response = f"❌ Multi-agent system error: {str(error_msg)}"
-                    st.session_state.chat_memory.add_message('assistant', response)
-                    st.session_state.last_evaluation = None
-                    return 
-                
-                # Extract response and additional info
-                response = result.final_response or 'No response generated'
-                st.session_state.current_chart = result.chart_data
-                st.session_state.current_report = result.report_path
-                
-                # Add sources if available
-                sources = []
-                if hasattr(result, 'sources') and result.sources:
-                    sources = result.sources
-                elif result['metadata'] and 'sources' in result['metadata']:
-                    sources = result['metadata']['sources']
-                    
-            elif isinstance(result, dict):
-                # It's a dictionary
-                if 'error' in result:
-                    error_msg = result['error']
-                    response = f"❌ Multi-agent system error: {str(error_msg)}"
-                    st.session_state.chat_memory.add_message('assistant', response)
-                    st.session_state.last_evaluation = None
-                    return 
-                
-                # Extract response and additional info
-                response = result.get('final_response', 'No response generated')
-                st.session_state.current_chart = result.get('chart_data')
-                st.session_state.current_report = result.get('report_path')
-                
-                # Add sources if available
-                sources = []
-                if result.get('sources'):
-                    sources = result['sources']
-                elif result.get('metadata') and isinstance(result['metadata'], dict) and 'sources' in result['metadata']:
-                    sources = result['metadata']['sources']
-            else:
-                # Unknown type, handle as error
-                response = f"❌ Unexpected result type: {type(result)}"
-                st.session_state.chat_memory.add_message('assistant', response)
                 return
-
+            
+            # Extract response and metadata
+            response = result.get('final_response', 'No response generated')
+            st.session_state.current_chart = result.get('chart_data')
+            st.session_state.current_report = result.get('report_path')
+            
+            # Get sources
+            metadata = result.get('metadata', {})
+            sources = metadata.get('sources', [])
+            
             # Add response to chat memory
-            st.session_state.chat_memory.add_message('assistant', response, sources=sources)
+            st.session_state.chat_memory.add_message(
+                'assistant',
+                response,
+                sources=sources
+            )
             
     except Exception as e:
-        print(f"❌ Error in multi-agent processing: {str(e)}")
+        st.error(f"❌ Error in multi-agent processing: {str(e)}")
         print(f"Error type: {type(e)}")
         import traceback
         traceback.print_exc()
-        response = "I apologize, but I encountered an error while processing your question with the multi-agent system."
-        st.session_state.chat_memory.add_message('assistant', response)
+        
+        st.session_state.chat_memory.add_message(
+            'assistant',
+            "I apologize, but I encountered an error while processing your request."
+        )
     
     finally:
         st.session_state.processing_question = False
