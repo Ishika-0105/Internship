@@ -649,15 +649,16 @@ def process_single_agent_question(user_input: str):
         st.rerun()
 
 async def run_multi_agent_query(user_input: str):
-    """Async function to run multi-agent query"""
+    """Run the multi-agent workflow"""
     try:
-        # Create initial state
-        initial_state = AgentState(query=user_input)
+        # Create initial state using AgentState
+        initial_state = AgentState(query=user_input).to_dict()
+        debug_state(initial_state, "run_multi_agent_query initial_state")
         
         # Set up config
         config = {
             "configurable": {
-                "thread_id": f"streamlit_{int(time.time())}",
+                "thread_id": str(time.time()),
                 "checkpoint_ns": int(time.time() * 1e9)
             }
         }
@@ -669,68 +670,75 @@ async def run_multi_agent_query(user_input: str):
             config=config
         ):
             if chunk:
-                # Convert chunk to AgentState if needed
-                if isinstance(chunk, dict):
-                    final_result = AgentState(**chunk)
-                else:
-                    final_result = chunk
+                debug_state(chunk, "run_multi_agent_query chunk")
+                final_result = chunk
         
-        return final_result or AgentState(error="No response from workflow")
+        if not final_result:
+            return AgentState(
+                query=user_input,
+                error="No response from workflow",
+                final_response="The system did not generate a response."
+            ).to_dict()
+            
+        debug_state(final_result, "run_multi_agent_query final_result")
+        return final_result
         
     except Exception as e:
-        return AgentState(error=f"Workflow error: {str(e)}")
+        return AgentState(
+            query=user_input,
+            error=f"Workflow error: {str(e)}",
+            final_response="An error occurred while processing your request."
+        ).to_dict()
 
 def process_multi_agent_question(user_input: str):
-    """Process user question using multi-agent system"""
+    """Process the user's question"""
     st.session_state.processing_question = True
     
     try:
-        # Add user message to chat memory
+        # Add user message
         st.session_state.chat_memory.add_message('user', user_input)
         
-        # Check multi-agent system
         if not st.session_state.multi_agent_system:
-            st.error("❌ Multi-agent system not initialized")
+            st.error("Multi-agent system not initialized")
             return
 
-        with st.spinner("🤖 Multi-agent system processing..."):
+        with st.spinner("Processing..."):
             # Run query
             result = asyncio.run(run_multi_agent_query(user_input))
             
-            # Handle result
+            print(f"Final result: {result}")  # Debug print
+            
+            # Handle errors
             if result.get('error'):
-                st.error(f"❌ {result['error']}")
+                st.error(f"Error: {result['error']}")
                 st.session_state.chat_memory.add_message(
                     'assistant',
-                    f"I encountered an error: {result['error']}"
+                    f"Error: {result['error']}"
                 )
                 return
             
-            # Extract response and metadata
+            # Process successful result
             response = result.get('final_response', 'No response generated')
+            
+            # Update state
             st.session_state.current_chart = result.get('chart_data')
             st.session_state.current_report = result.get('report_path')
             
-            # Get sources
-            metadata = result.get('metadata', {})
-            sources = metadata.get('sources', [])
-            
-            # Add response to chat memory
+            # Add response
             st.session_state.chat_memory.add_message(
                 'assistant',
                 response,
-                sources=sources
+                sources=result.get('metadata', {}).get('sources', [])
             )
             
     except Exception as e:
-        st.error(f"❌ Error in multi-agent processing: {str(e)}")
-        print(f"Error type: {type(e)}")
-        import traceback
+        st.error(f"Error: {str(e)}")
+        print(f"Process error: {str(e)}")  # Debug print
         traceback.print_exc()
         
         st.session_state.chat_memory.add_message(
             'assistant',
-            "I apologize, but I encountered an error while processing your request."
+            "An error occurred while processing your request."
         )
     
     finally:
