@@ -691,40 +691,75 @@ async def run_multi_agent_query(user_input: str):
         ).to_dict()
 
 def process_multi_agent_question(user_input: str):
-    """Process the user's question"""
+    """Process user question using multi-agent system"""
     st.session_state.processing_question = True
     
     try:
-        # Add user message
+        # Add user message to chat memory
         st.session_state.chat_memory.add_message('user', user_input)
         
         if not st.session_state.multi_agent_system:
-            st.error("Multi-agent system not initialized")
+            st.error("❌ Multi-agent system not initialized")
             return
 
-        with st.spinner("Processing..."):
+        with st.spinner("🤖 Multi-agent system processing..."):
             # Run query
-            result = asyncio.run(run_multi_agent_query(user_input))
-            
-            print(f"Final result: {result}")  # Debug print
+            async def run_query():
+                # Initialize state
+                initial_state = {
+                    "query": user_input,
+                    "documents": [],
+                    "analysis_response": "",
+                    "chart_data": None,
+                    "chart_image": None,
+                    "report_path": None,
+                    "supervisor_decision": "",
+                    "next_agent": "",
+                    "final_response": "",
+                    "metadata": {},
+                    "error": None,
+                    "messages": []
+                }
+                
+                print(f"Initial state: {initial_state}")
+                
+                # Run workflow
+                final_result = None
+                async for chunk in st.session_state.multi_agent_system.workflow.astream(
+                    initial_state,
+                    config={"configurable": {"thread_id": str(time.time())}}
+                ):
+                    if chunk:
+                        print(f"Chunk: {chunk}")
+                        final_result = chunk
+                
+                return final_result or {
+                    "query": user_input,
+                    "error": "No response generated",
+                    "final_response": "The system did not generate a response."
+                }
+
+            # Run the query
+            result = asyncio.run(run_query())
+            print(f"Final result: {result}")
             
             # Handle errors
             if result.get('error'):
-                st.error(f"Error: {result['error']}")
+                st.error(f"❌ {result['error']}")
                 st.session_state.chat_memory.add_message(
                     'assistant',
                     f"Error: {result['error']}"
                 )
                 return
             
-            # Process successful result
+            # Get response
             response = result.get('final_response', 'No response generated')
             
-            # Update state
+            # Update visualization state
             st.session_state.current_chart = result.get('chart_data')
             st.session_state.current_report = result.get('report_path')
             
-            # Add response
+            # Add response to chat
             st.session_state.chat_memory.add_message(
                 'assistant',
                 response,
@@ -732,13 +767,13 @@ def process_multi_agent_question(user_input: str):
             )
             
     except Exception as e:
-        st.error(f"Error: {str(e)}")
-        print(f"Process error: {str(e)}")  # Debug print
+        print(f"Process error: {str(e)}")
         traceback.print_exc()
+        st.error(f"❌ Error: {str(e)}")
         
         st.session_state.chat_memory.add_message(
             'assistant',
-            "An error occurred while processing your request."
+            "I apologize, but I encountered an error while processing your request."
         )
     
     finally:
