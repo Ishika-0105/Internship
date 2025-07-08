@@ -314,7 +314,23 @@ class MultiAgentFinancialRAG:
         self.supervisor  = SupervisorAgent(self.llm)
  
         self.workflow = self._create_workflow()
- 
+    
+    def _format_state(self, state: Dict) -> str:
+        status = []
+        if state.get("query"):
+            status.append(f"query: {state['query']}")
+        if state.get("documents"):
+            status.append("documents retrieved")
+        if state.get("metadata", {}).get("analysis"):
+            status.append("analysis ready")
+        if state.get("chart_data"):
+            status.append("chart generated")
+        if state.get("report_path"):
+            status.append("report created")
+        if state.get("error"):
+            status.append(f"error: {state['error']}")
+        return "; ".join(status) or "initial state"
+
     # --------------------------------------------------------------------- #
     #  Workflow Graph                                                       #
     def _create_workflow(self) -> StateGraph:
@@ -338,23 +354,6 @@ class MultiAgentFinancialRAG:
                 "messages": []
             }
             return {**base_state, **state_dict}
-
-        def format_state(state: Dict) -> str:
-            """Format state for supervisor decision making"""
-            status = []
-            if state.get("query"):
-                status.append(f"query: {state['query']}")
-            if state.get("documents"):
-                status.append("documents retrieved")
-            if state.get("metadata", {}).get("analysis"):
-                status.append("analysis ready")
-            if state.get("chart_data"):
-                status.append("chart generated")
-            if state.get("report_path"):
-                status.append("report created")
-            if state.get("error"):
-                status.append(f"error: {state['error']}")
-            return "; ".join(status) or "initial state"
 
         def supervisor_node(state: Dict) -> Dict:
             """Supervisor node with safe state handling"""
@@ -601,36 +600,6 @@ class MultiAgentFinancialRAG:
         workflow.add_edge("final_response", END)
 
         return workflow.compile(checkpointer=MemorySaver())
-
-    def _format_state(self, state: Dict) -> str:
-        """Format state for supervisor decision making"""
-        status = []
-        
-        # Check query
-        if state.get("query"):
-            status.append(f"query: {state['query']}")
-        
-        # Check documents
-        if state.get("documents"):
-            status.append("documents retrieved")
-        
-        # Check analysis
-        if state.get("metadata", {}).get("analysis"):
-            status.append("analysis ready")
-        
-        # Check chart
-        if state.get("chart_data"):
-            status.append("chart generated")
-        
-        # Check report
-        if state.get("report_path"):
-            status.append("report created")
-        
-        # Check errors
-        if state.get("error"):
-            status.append(f"error: {state['error']}")
-        
-        return "; ".join(status) or "initial state"
 
     async def process_query(self, query: str) -> Dict[str, Any]:
         """Process a query through the workflow"""
