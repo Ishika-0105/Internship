@@ -693,89 +693,91 @@ async def run_multi_agent_query(user_input: str):
 def process_multi_agent_question(user_input: str):
     """Process user question using multi-agent system"""
     st.session_state.processing_question = True
-    
+
     try:
         # Add user message to chat memory
         st.session_state.chat_memory.add_message('user', user_input)
-        
+
+        # Check if multi-agent system is initialized
         if not st.session_state.multi_agent_system:
             st.error("❌ Multi-agent system not initialized")
             return
 
         with st.spinner("🤖 Multi-agent system processing..."):
-            # Run query
-            async def run_query():
-                # Initialize state
-                initial_state = {
-                    "query": user_input,
-                    "documents": [],
-                    "analysis_response": "",
-                    "chart_data": None,
-                    "chart_image": None,
-                    "report_path": None,
-                    "supervisor_decision": "",
-                    "next_agent": "",
-                    "final_response": "",
-                    "metadata": {},
-                    "error": None,
-                    "messages": []
-                }
-                
-                print(f"Initial state: {initial_state}")
-                
-                # Run workflow
-                final_result = None
-                async for chunk in st.session_state.multi_agent_system.workflow.astream(
-                    initial_state,
-                    config={"configurable": {"thread_id": str(time.time())}}
-                ):
-                    if chunk:
-                        print(f"Chunk: {chunk}")
-                        final_result = chunk
-                
-                return final_result or {
-                    "query": user_input,
-                    "error": "No response generated",
-                    "final_response": "The system did not generate a response."
-                }
+            # Initialize state
+            initial_state = {
+                "query": user_input,
+                "documents": [],
+                "analysis_response": "",
+                "chart_data": None,
+                "chart_image": None,
+                "report_path": None,
+                "supervisor_decision": "",
+                "next_agent": "",
+                "final_response": "",
+                "metadata": {},
+                "error": None,
+                "messages": []
+            }
 
-            # Run the query
-            result = asyncio.run(run_query())
+            # Configure the checkpointer
+            config = {
+                "configurable": {
+                    "thread_id": "streamlit_app",  # static thread_id
+                    "checkpoint_ns": int(time.time() * 1e9),  # time-based namespace
+                    "checkpoint_id": str(uuid.uuid4()) # unique ID
+                }
+            }
+
+            # Run workflow and capture state at each step
+            all_chunks = []
+            for chunk in st.session_state.multi_agent_system.workflow.stream(initial_state, config=config):
+                all_chunks.append(chunk)
+
+            # Get the final result
+            if all_chunks:
+                result = all_chunks[-1]
+            else:
+                result = {"error": "No response from workflow"}
+
+            # Debug print statements
+            print(f"All chunks: {all_chunks}")
             print(f"Final result: {result}")
-            
+
             # Handle errors
-            if result.get('error'):
+            if "error" in result:
                 st.error(f"❌ {result['error']}")
                 st.session_state.chat_memory.add_message(
                     'assistant',
                     f"Error: {result['error']}"
                 )
                 return
-            
+
             # Get response
             response = result.get('final_response', 'No response generated')
-            
+
             # Update visualization state
             st.session_state.current_chart = result.get('chart_data')
             st.session_state.current_report = result.get('report_path')
-            
+
             # Add response to chat
             st.session_state.chat_memory.add_message(
                 'assistant',
                 response,
                 sources=result.get('metadata', {}).get('sources', [])
             )
-            
+
     except Exception as e:
         print(f"Process error: {str(e)}")
+        import traceback
         traceback.print_exc()
         st.error(f"❌ Error: {str(e)}")
-        
+
         st.session_state.chat_memory.add_message(
             'assistant',
             "I apologize, but I encountered an error while processing your request."
         )
-    
+
     finally:
         st.session_state.processing_question = False
         st.rerun()
