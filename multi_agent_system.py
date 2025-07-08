@@ -221,21 +221,17 @@ def generate_financial_report(analysis: Dict[str, Any], chart_base64: str, query
  
 # --------------------------------------------------------------------------- #
 # 3.  Router Schema                                                           #
-# --------------------------------------------------------------------------- #
- 
 class RouterModel(TypedDict):
     next: Literal["DocumentQuery", "ChartGeneration", "ReportGeneration", "FINISH"]
     reasoning: str
  
 # --------------------------------------------------------------------------- #
 # 4.  Individual Agents                                                       #
-# --------------------------------------------------------------------------- #
  
 class DocumentQueryAgent:
     def __init__(self, llm: ChatGroq, vector_store: VectorStore):
         self.llm = llm
         self.vector_store = vector_store
-        self.tools = [retrieve_financial_documents, analyze_financial_data]
  
     def create_agent(self):
         sys_prompt = (
@@ -248,11 +244,9 @@ class DocumentQueryAgent:
             ("human", "{input}")
         ]) | self.llm
  
- 
 class ChartGenerationAgent:
     def __init__(self, llm: ChatGroq):
         self.llm = llm
-        self.tools = [generate_chart_data, create_financial_chart]
  
     def create_agent(self):
         sys_prompt = (
@@ -263,11 +257,9 @@ class ChartGenerationAgent:
             ("human", "{input}")
         ]) | self.llm
  
- 
 class ReportGenerationAgent:
     def __init__(self, llm: ChatGroq):
         self.llm = llm
-        self.tools = [generate_financial_report]
  
     def create_agent(self):
         sys_prompt = (
@@ -277,7 +269,6 @@ class ReportGenerationAgent:
             ("system", sys_prompt),
             ("human", "{input}")
         ]) | self.llm
- 
  
 class SupervisorAgent:
     """
@@ -302,7 +293,6 @@ class SupervisorAgent:
  
 # --------------------------------------------------------------------------- #
 # 5.  Multi-Agent Orchestrator                                                #
-# --------------------------------------------------------------------------- #
  
 class MultiAgentFinancialRAG:
     def __init__(self, vector_store: VectorStore, llm_manager: LLMManager):
@@ -327,7 +317,6 @@ class MultiAgentFinancialRAG:
  
     # --------------------------------------------------------------------- #
     #  Workflow Graph                                                       #
-    # --------------------------------------------------------------------- #
     def _create_workflow(self) -> StateGraph:
         """Create the workflow graph"""
         workflow = StateGraph(AgentState)
@@ -350,34 +339,21 @@ class MultiAgentFinancialRAG:
             }
             return {**base_state, **state_dict}
 
-        def _format_state(self, state: Dict) -> str:
+        def format_state(state: Dict) -> str:
             """Format state for supervisor decision making"""
             status = []
-            
-            # Check query
             if state.get("query"):
                 status.append(f"query: {state['query']}")
-            
-            # Check documents
             if state.get("documents"):
                 status.append("documents retrieved")
-            
-            # Check analysis
             if state.get("metadata", {}).get("analysis"):
                 status.append("analysis ready")
-            
-            # Check chart
             if state.get("chart_data"):
                 status.append("chart generated")
-            
-            # Check report
             if state.get("report_path"):
                 status.append("report created")
-            
-            # Check errors
             if state.get("error"):
                 status.append(f"error: {state['error']}")
-        
             return "; ".join(status) or "initial state"
 
         def supervisor_node(state: Dict) -> Dict:
@@ -404,7 +380,7 @@ class MultiAgentFinancialRAG:
                 chain = self.supervisor.create_supervisor_chain()
                 decision = chain.invoke({
                     "query": state.get("query", ""),
-                    "state": self._format_state(state)
+                    "state": format_state(state)
                 })
                 
                 # Update state
@@ -436,27 +412,23 @@ class MultiAgentFinancialRAG:
             debug_state(state, "document_query_node entry")
             try:
                 state = _ensure_state(state)
-                query = state["query"]
-
+                query = state.get("query", "")
                 # Get documents
                 doc_result = retrieve_financial_documents.invoke({
                     "query": query,
                     "vector_store": self.vector_store
                 })
-
                 if doc_result.get("error"):
                     return {
                         **state,
                         "error": doc_result["error"],
                         "next_agent": "FINISH"
                     }
-
                 # Analyze documents
                 analysis = analyze_financial_data.invoke({
                     "context": doc_result.get("context", ""),
                     "query": query
                 })
-
                 # Update state
                 result = {
                     **state,
@@ -469,7 +441,6 @@ class MultiAgentFinancialRAG:
                 }
                 debug_state(result, "document_query_node exit")
                 return result
-
             except Exception as e:
                 error_result = {
                     **state,
@@ -485,25 +456,21 @@ class MultiAgentFinancialRAG:
             try:
                 state = _ensure_state(state)
                 analysis = state.get("metadata", {}).get("analysis", {})
-
                 # Generate chart data
                 chart_data = generate_chart_data.invoke({
                     "analysis": analysis,
                     "chart_type": "auto"
                 })
-
                 if chart_data.get("error"):
                     return {
                         **state,
                         "error": chart_data["error"],
                         "next_agent": "FINISH"
                     }
-
                 # Create chart image
                 chart_image = create_financial_chart.invoke({
                     "chart_data": chart_data
                 })
-
                 # Update state
                 result = {
                     **state,
@@ -512,7 +479,6 @@ class MultiAgentFinancialRAG:
                 }
                 debug_state(result, "chart_generation_node exit")
                 return result
-
             except Exception as e:
                 error_result = {
                     **state,
@@ -528,14 +494,12 @@ class MultiAgentFinancialRAG:
             try:
                 state = _ensure_state(state)
                 analysis = state.get("metadata", {}).get("analysis", {})
-
                 # Generate report
                 report_path = generate_financial_report.invoke({
                     "analysis": analysis,
                     "chart_base64": state.get("chart_image", ""),
                     "query": state["query"]
                 })
-
                 # Update state
                 result = {
                     **state,
@@ -543,7 +507,6 @@ class MultiAgentFinancialRAG:
                 }
                 debug_state(result, "report_generation_node exit")
                 return result
-
             except Exception as e:
                 error_result = {
                     **state,
@@ -609,7 +572,7 @@ class MultiAgentFinancialRAG:
         workflow.add_node("chart_generation", chart_generation_node)
         workflow.add_node("report_generation", report_generation_node)
         workflow.add_node("final_response", final_response_node)
-        workflow.add_node("finish", lambda s: s)
+        workflow.add_node("finish", lambda s: dict(s))
 
         # Add edges
         workflow.add_edge(START, "supervisor")
@@ -638,6 +601,36 @@ class MultiAgentFinancialRAG:
         workflow.add_edge("final_response", END)
 
         return workflow.compile(checkpointer=MemorySaver())
+
+    def _format_state(self, state: Dict) -> str:
+        """Format state for supervisor decision making"""
+        status = []
+        
+        # Check query
+        if state.get("query"):
+            status.append(f"query: {state['query']}")
+        
+        # Check documents
+        if state.get("documents"):
+            status.append("documents retrieved")
+        
+        # Check analysis
+        if state.get("metadata", {}).get("analysis"):
+            status.append("analysis ready")
+        
+        # Check chart
+        if state.get("chart_data"):
+            status.append("chart generated")
+        
+        # Check report
+        if state.get("report_path"):
+            status.append("report created")
+        
+        # Check errors
+        if state.get("error"):
+            status.append(f"error: {state['error']}")
+        
+        return "; ".join(status) or "initial state"
 
     async def process_query(self, query: str) -> Dict[str, Any]:
         """Process a query through the workflow"""
