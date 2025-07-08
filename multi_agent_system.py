@@ -1,14 +1,15 @@
 from __future__ import annotations
 import uuid, io, base64, asyncio, re, json, os, time, datetime as _dt
 from typing import Dict, List, Any, Optional, Literal, TypedDict
- 
+from dataclasses import dataclass, field
+
 # LangChain / LangGraph
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_groq import ChatGroq
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.checkpoint.memory import MemorySaver
 
  
@@ -29,12 +30,11 @@ from config import Config
 # 1.  Shared Agent State                                                      #
 # --------------------------------------------------------------------------- #
  
-class AgentState(MessagesState):
-    """State container for the workflow"""
+class AgentState(dict):
+    """Workflow state dictionary"""
     
     def __init__(self, query: str = "", **kwargs):
-        super().__init__()  # Initialize MessagesState
-        self._data = {
+        super().__init__({
             "query": query,
             "documents": [],
             "analysis_response": "",
@@ -47,29 +47,18 @@ class AgentState(MessagesState):
             "metadata": {},
             "error": None,
             "messages": []
-        }
-        self._data.update(kwargs)
-
+        })
+        
+        # Update with provided values
+        for k, v in kwargs.items():
+            if k in self:
+                self[k] = v
+    
     def __getitem__(self, key: str) -> Any:
-        return self._data.get(key)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        self._data[key] = value
-
+        return self.get(key)
+    
     def get(self, key: str, default: Any = None) -> Any:
-        return self._data.get(key, default)
-
-    def update(self, data: Dict[str, Any]) -> None:
-        self._data.update(data)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return self._data.copy()
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'AgentState':
-        state = cls(query=data.get('query', ''))
-        state._data = data.copy()
-        return state
+        return super().get(key, default)
  
 def debug_state(state: Dict, location: str) -> None:
     """Debug helper to print state information"""
@@ -361,48 +350,86 @@ class MultiAgentFinancialRAG:
             }
             return {**base_state, **state_dict}
 
+        def _format_state(self, state: Dict) -> str:
+            """Format state for supervisor decision making"""
+            status = []
+            
+            # Check query
+            if state.get("query"):
+                status.append(f"query: {state['query']}")
+            
+            # Check documents
+            if state.get("documents"):
+                status.append("documents retrieved")
+            
+            # Check analysis
+            if state.get("metadata", {}).get("analysis"):
+                status.append("analysis ready")
+            
+            # Check chart
+            if state.get("chart_data"):
+                status.append("chart generated")
+            
+            # Check report
+            if state.get("report_path"):
+                status.append("report created")
+            
+            # Check errors
+            if state.get("error"):
+                status.append(f"error: {state['error']}")
+        
+            return "; ".join(status) or "initial state"
+
         def supervisor_node(state: Dict) -> Dict:
-            """Supervisor node that decides next action"""
-            debug_state(state, "supervisor_node entry")
+            """Supervisor node with safe state handling"""
             try:
-                # Ensure state is complete
-                state = _ensure_state(state)
-
-                # Verify query exists
-                query = state.get("query")
-                if not query:
-                    return {
-                        **state,
-                        "error": "Missing query in supervisor node",
-                        "next_agent": "FINISH",
-                        "final_response": "Error: No query provided"
+                # Initialize state if empty
+                if not state:
+                    state = {
+                        "query": "",
+                        "documents": [],
+                        "analysis_response": "",
+                        "chart_data": None,
+                        "chart_image": None,
+                        "report_path": None,
+                        "supervisor_decision": "",
+                        "next_agent": "",
+                        "final_response": "",
+                        "metadata": {},
+                        "error": None,
+                        "messages": []
                     }
-
+                
                 # Get supervisor decision
                 chain = self.supervisor.create_supervisor_chain()
                 decision = chain.invoke({
-                    "query": query,
+                    "query": state.get("query", ""),
                     "state": self._format_state(state)
                 })
-
+                
                 # Update state
-                result = {
-                    **state,
+                state.update({
                     "supervisor_decision": decision.get("reasoning", ""),
                     "next_agent": decision.get("next", "FINISH")
-                }
-                debug_state(result, "supervisor_node exit")
-                return result
-
+                })
+                
+                return state
+                
             except Exception as e:
-                error_result = {
-                    **state,
-                    "error": f"Supervisor error: {str(e)}",
+                return {
+                    "query": state.get("query", ""),
+                    "documents": [],
+                    "analysis_response": "",
+                    "chart_data": None,
+                    "chart_image": None,
+                    "report_path": None,
+                    "supervisor_decision": "",
                     "next_agent": "FINISH",
-                    "final_response": f"Error in supervisor: {str(e)}"
+                    "final_response": "",
+                    "metadata": {},
+                    "error": f"Supervisor error: {str(e)}",
+                    "messages": []
                 }
-                debug_state(error_result, "supervisor_node error")
-                return error_result
 
         def document_query_node(state: Dict) -> Dict:
             """Document retrieval and analysis node"""
@@ -527,46 +554,54 @@ class MultiAgentFinancialRAG:
                 return error_result
 
         def final_response_node(state: Dict) -> Dict:
-            """Final response generation node"""
-            debug_state(state, "final_response_node entry")
+            """Final response node with safe state handling"""
             try:
-                state = _ensure_state(state)
-
+                # Initialize state if empty
+                if not state:
+                    state = {
+                        "query": "",
+                        "documents": [],
+                        "analysis_response": "",
+                        "chart_data": None,
+                        "chart_image": None,
+                        "report_path": None,
+                        "supervisor_decision": "",
+                        "next_agent": "",
+                        "final_response": "",
+                        "metadata": {},
+                        "error": None,
+                        "messages": []
+                    }
+                
                 # Handle existing errors
                 if state.get("error"):
                     return {
                         **state,
                         "final_response": f"Error occurred: {state['error']}"
                     }
-
-                # Generate final response
-                analysis = state.get("metadata", {}).get("analysis", {})
-                prompt = ChatPromptTemplate.from_messages([
+                
+                # Generate summary
+                summary_prompt = ChatPromptTemplate.from_messages([
                     ("system", "Write a concise business summary."),
                     ("human", "Query: {query}\nMetrics: {metrics}")
                 ])
-
-                response = prompt.invoke({
-                    "query": state["query"],
+                
+                analysis = state.get("metadata", {}).get("analysis", {})
+                response = summary_prompt.invoke({
+                    "query": state.get("query", "No query provided"),
                     "metrics": json.dumps(analysis)
                 })
-
+                
                 # Update state
-                result = {
-                    **state,
-                    "final_response": response.content if hasattr(response, 'content') else str(response)
-                }
-                debug_state(result, "final_response_node exit")
-                return result
-
+                state["final_response"] = response.content if hasattr(response, "content") else str(response)
+                return state
+                
             except Exception as e:
-                error_result = {
+                return {
                     **state,
                     "error": f"Final response error: {str(e)}",
-                    "final_response": "Error generating response"
+                    "final_response": "An error occurred while generating the response."
                 }
-                debug_state(error_result, "final_response_node error")
-                return error_result
 
         # Register nodes
         workflow.add_node("supervisor", supervisor_node)
