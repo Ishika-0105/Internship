@@ -293,10 +293,14 @@ class SupervisorAgent:
  
 # --------------------------------------------------------------------------- #
 # 5.  Multi-Agent Orchestrator                                                #
- 
+
 class MultiAgentFinancialRAG:
     def __init__(self, vector_store: VectorStore, llm_manager: LLMManager):
-        # Select provider
+        # Current timestamp and user information
+        self.init_time = "2025-07-08 09:47:52"  # Current UTC time
+        self.user_login = "Ishika-0105"         # Current user login
+        
+        # Provider validation
         if llm_manager.current_provider != "groq":
             raise ValueError("Unsupported LLM provider")
  
@@ -307,15 +311,17 @@ class MultiAgentFinancialRAG:
         )
         self.vector_store = vector_store
  
-        # Agents
-        self.doc_agent   = DocumentQueryAgent(self.llm, vector_store)
+        # Initialize agents
+        self.doc_agent = DocumentQueryAgent(self.llm, vector_store)
         self.chart_agent = ChartGenerationAgent(self.llm)
-        self.report_agent= ReportGenerationAgent(self.llm)
-        self.supervisor  = SupervisorAgent(self.llm)
+        self.report_agent = ReportGenerationAgent(self.llm)
+        self.supervisor = SupervisorAgent(self.llm)
  
+        # Create workflow
         self.workflow = self._create_workflow()
-    
+
     def _format_state(self, state: Dict) -> str:
+        """Format the current state into a string representation"""
         status = []
         if state.get("query"):
             status.append(f"query: {state['query']}")
@@ -331,246 +337,192 @@ class MultiAgentFinancialRAG:
             status.append(f"error: {state['error']}")
         return "; ".join(status) or "initial state"
 
-    # --------------------------------------------------------------------- #
-    #  Workflow Graph                                                       #
+    def supervisor_node(self, state: Dict) -> Dict:
+        """Supervisor node to manage workflow decisions"""
+        try:
+            if not state:
+                state = AgentState()
+            
+            supervisor_chain = self.supervisor.create_supervisor_chain()
+            decision = supervisor_chain.invoke({
+                "query": state.get("query", ""),
+                "state": self._format_state(state)
+            })
+            
+            state.update({
+                "supervisor_decision": decision.get("reasoning", ""),
+                "next_agent": decision.get("next", "FINISH"),
+                "timestamp": self.init_time,
+                "user": self.user_login
+            })
+            
+            return state
+            
+        except Exception as e:
+            return AgentState(
+                query=state.get("query", ""),
+                error=f"Supervisor error: {str(e)}",
+                next_agent="FINISH",
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+    def document_query_node(self, state: Dict) -> Dict:
+        """Document retrieval and analysis node"""
+        try:
+            query = state.get("query", "")
+            doc_result = retrieve_financial_documents.invoke({
+                "query": query,
+                "vector_store": self.vector_store
+            })
+            
+            if "error" in doc_result:
+                return AgentState(
+                    query=query,
+                    error=doc_result["error"],
+                    next_agent="FINISH",
+                    timestamp=self.init_time,
+                    user=self.user_login
+                ).to_dict()
+
+            analysis = analyze_financial_data.invoke({
+                "context": doc_result.get("context", ""),
+                "query": query
+            })
+
+            return AgentState(
+                query=query,
+                documents=doc_result.get("documents", []),
+                metadata={
+                    "analysis": analysis,
+                    "sources": doc_result.get("sources", [])
+                },
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+        except Exception as e:
+            return AgentState(
+                query=state.get("query", ""),
+                error=f"Document query error: {str(e)}",
+                next_agent="FINISH",
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+    def chart_generation_node(self, state: Dict) -> Dict:
+        """Chart generation node"""
+        try:
+            analysis = state.get("metadata", {}).get("analysis", {})
+            chart_data = generate_chart_data.invoke({
+                "analysis": analysis,
+                "chart_type": "auto"
+            })
+
+            if "error" in chart_data:
+                return AgentState(
+                    query=state.get("query", ""),
+                    error=chart_data["error"],
+                    next_agent="FINISH",
+                    timestamp=self.init_time,
+                    user=self.user_login
+                ).to_dict()
+
+            chart_image = create_financial_chart.invoke({
+                "chart_data": chart_data
+            })
+
+            return AgentState(
+                **state,
+                chart_data=chart_data,
+                chart_image=chart_image,
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+        except Exception as e:
+            return AgentState(
+                query=state.get("query", ""),
+                error=f"Chart generation error: {str(e)}",
+                next_agent="FINISH",
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+    def report_generation_node(self, state: Dict) -> Dict:
+        """Report generation node"""
+        try:
+            analysis = state.get("metadata", {}).get("analysis", {})
+            report_path = generate_financial_report.invoke({
+                "analysis": analysis,
+                "chart_base64": state.get("chart_image", ""),
+                "query": state.get("query", "")
+            })
+
+            return AgentState(
+                **state,
+                report_path=report_path,
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+        except Exception as e:
+            return AgentState(
+                query=state.get("query", ""),
+                error=f"Report generation error: {str(e)}",
+                next_agent="FINISH",
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+    def final_response_node(self, state: Dict) -> Dict:
+        """Final response generation node"""
+        try:
+            if state.get("error"):
+                return AgentState(
+                    **state,
+                    final_response=f"Error occurred: {state['error']}",
+                    timestamp=self.init_time,
+                    user=self.user_login
+                ).to_dict()
+
+            summary_prompt = ChatPromptTemplate.from_messages([
+                ("system", "Write a concise business summary."),
+                ("human", "Query: {query}\nMetrics: {metrics}")
+            ])
+
+            analysis = state.get("metadata", {}).get("analysis", {})
+            response = summary_prompt.invoke({
+                "query": state.get("query", "No query provided"),
+                "metrics": json.dumps(analysis)
+            })
+
+            return AgentState(
+                **state,
+                final_response=response.content if hasattr(response, "content") else str(response),
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
+        except Exception as e:
+            return AgentState(
+                query=state.get("query", ""),
+                error=f"Final response error: {str(e)}",
+                final_response="An error occurred while generating the response.",
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+
     def _create_workflow(self) -> StateGraph:
         """Create the workflow graph"""
         workflow = StateGraph(AgentState)
 
-        def _ensure_state(state_dict: Dict[str, Any]) -> Dict[str, Any]:
-            """Ensure state has all required fields"""
-            base_state = {
-                "query": "",
-                "documents": [],
-                "analysis_response": "",
-                "chart_data": None,
-                "chart_image": None,
-                "report_path": None,
-                "supervisor_decision": "",
-                "next_agent": "",
-                "final_response": "",
-                "metadata": {},
-                "error": None,
-                "messages": []
-            }
-            return {**base_state, **state_dict}
-
-        def supervisor_node(state: Dict) -> Dict:
-            """Supervisor node with safe state handling"""
-            try:
-                # Initialize state if empty
-                if not state:
-                    state = {
-                        "query": "",
-                        "documents": [],
-                        "analysis_response": "",
-                        "chart_data": None,
-                        "chart_image": None,
-                        "report_path": None,
-                        "supervisor_decision": "",
-                        "next_agent": "",
-                        "final_response": "",
-                        "metadata": {},
-                        "error": None,
-                        "messages": []
-                    }
-                
-                # Get supervisor decision
-                chain = self.supervisor.create_supervisor_chain()
-                decision = chain.invoke({
-                    "query": state.get("query", ""),
-                    "state": format_state(state)
-                })
-                
-                # Update state
-                state.update({
-                    "supervisor_decision": decision.get("reasoning", ""),
-                    "next_agent": decision.get("next", "FINISH")
-                })
-                
-                return state
-                
-            except Exception as e:
-                return {
-                    "query": state.get("query", ""),
-                    "documents": [],
-                    "analysis_response": "",
-                    "chart_data": None,
-                    "chart_image": None,
-                    "report_path": None,
-                    "supervisor_decision": "",
-                    "next_agent": "FINISH",
-                    "final_response": "",
-                    "metadata": {},
-                    "error": f"Supervisor error: {str(e)}",
-                    "messages": []
-                }
-
-        def document_query_node(state: Dict) -> Dict:
-            """Document retrieval and analysis node"""
-            debug_state(state, "document_query_node entry")
-            try:
-                state = _ensure_state(state)
-                query = state.get("query", "")
-                # Get documents
-                doc_result = retrieve_financial_documents.invoke({
-                    "query": query,
-                    "vector_store": self.vector_store
-                })
-                if doc_result.get("error"):
-                    return {
-                        **state,
-                        "error": doc_result["error"],
-                        "next_agent": "FINISH"
-                    }
-                # Analyze documents
-                analysis = analyze_financial_data.invoke({
-                    "context": doc_result.get("context", ""),
-                    "query": query
-                })
-                # Update state
-                result = {
-                    **state,
-                    "documents": doc_result.get("documents", []),
-                    "metadata": {
-                        **state.get("metadata", {}),
-                        "analysis": analysis,
-                        "sources": doc_result.get("sources", [])
-                    }
-                }
-                debug_state(result, "document_query_node exit")
-                return result
-            except Exception as e:
-                error_result = {
-                    **state,
-                    "error": f"Document query error: {str(e)}",
-                    "next_agent": "FINISH"
-                }
-                debug_state(error_result, "document_query_node error")
-                return error_result
-
-        def chart_generation_node(state: Dict) -> Dict:
-            """Chart generation node"""
-            debug_state(state, "chart_generation_node entry")
-            try:
-                state = _ensure_state(state)
-                analysis = state.get("metadata", {}).get("analysis", {})
-                # Generate chart data
-                chart_data = generate_chart_data.invoke({
-                    "analysis": analysis,
-                    "chart_type": "auto"
-                })
-                if chart_data.get("error"):
-                    return {
-                        **state,
-                        "error": chart_data["error"],
-                        "next_agent": "FINISH"
-                    }
-                # Create chart image
-                chart_image = create_financial_chart.invoke({
-                    "chart_data": chart_data
-                })
-                # Update state
-                result = {
-                    **state,
-                    "chart_data": chart_data,
-                    "chart_image": chart_image
-                }
-                debug_state(result, "chart_generation_node exit")
-                return result
-            except Exception as e:
-                error_result = {
-                    **state,
-                    "error": f"Chart generation error: {str(e)}",
-                    "next_agent": "FINISH"
-                }
-                debug_state(error_result, "chart_generation_node error")
-                return error_result
-
-        def report_generation_node(state: Dict) -> Dict:
-            """Report generation node"""
-            debug_state(state, "report_generation_node entry")
-            try:
-                state = _ensure_state(state)
-                analysis = state.get("metadata", {}).get("analysis", {})
-                # Generate report
-                report_path = generate_financial_report.invoke({
-                    "analysis": analysis,
-                    "chart_base64": state.get("chart_image", ""),
-                    "query": state["query"]
-                })
-                # Update state
-                result = {
-                    **state,
-                    "report_path": report_path
-                }
-                debug_state(result, "report_generation_node exit")
-                return result
-            except Exception as e:
-                error_result = {
-                    **state,
-                    "error": f"Report generation error: {str(e)}",
-                    "next_agent": "FINISH"
-                }
-                debug_state(error_result, "report_generation_node error")
-                return error_result
-
-        def final_response_node(state: Dict) -> Dict:
-            """Final response node with safe state handling"""
-            try:
-                # Initialize state if empty
-                if not state:
-                    state = {
-                        "query": "",
-                        "documents": [],
-                        "analysis_response": "",
-                        "chart_data": None,
-                        "chart_image": None,
-                        "report_path": None,
-                        "supervisor_decision": "",
-                        "next_agent": "",
-                        "final_response": "",
-                        "metadata": {},
-                        "error": None,
-                        "messages": []
-                    }
-                
-                # Handle existing errors
-                if state.get("error"):
-                    return {
-                        **state,
-                        "final_response": f"Error occurred: {state['error']}"
-                    }
-                
-                # Generate summary
-                summary_prompt = ChatPromptTemplate.from_messages([
-                    ("system", "Write a concise business summary."),
-                    ("human", "Query: {query}\nMetrics: {metrics}")
-                ])
-                
-                analysis = state.get("metadata", {}).get("analysis", {})
-                response = summary_prompt.invoke({
-                    "query": state.get("query", "No query provided"),
-                    "metrics": json.dumps(analysis)
-                })
-                
-                # Update state
-                state["final_response"] = response.content if hasattr(response, "content") else str(response)
-                return state
-                
-            except Exception as e:
-                return {
-                    **state,
-                    "error": f"Final response error: {str(e)}",
-                    "final_response": "An error occurred while generating the response."
-                }
-
-        # Register nodes
-        workflow.add_node("supervisor", supervisor_node)
-        workflow.add_node("document_query", document_query_node)
-        workflow.add_node("chart_generation", chart_generation_node)
-        workflow.add_node("report_generation", report_generation_node)
-        workflow.add_node("final_response", final_response_node)
+        # Register nodes using bound methods
+        workflow.add_node("supervisor", self.supervisor_node)
+        workflow.add_node("document_query", self.document_query_node)
+        workflow.add_node("chart_generation", self.chart_generation_node)
+        workflow.add_node("report_generation", self.report_generation_node)
+        workflow.add_node("final_response", self.final_response_node)
         workflow.add_node("finish", lambda s: dict(s))
 
         # Add edges
@@ -604,24 +556,12 @@ class MultiAgentFinancialRAG:
     async def process_query(self, query: str) -> Dict[str, Any]:
         """Process a query through the workflow"""
         try:
-            # Create initial state
-            initial_state = {
-                "query": query,
-                "documents": [],
-                "analysis_response": "",
-                "chart_data": None,
-                "chart_image": None,
-                "report_path": None,
-                "supervisor_decision": "",
-                "next_agent": "",
-                "final_response": "",
-                "metadata": {},
-                "error": None,
-                "messages": []
-            }
-            debug_state(initial_state, "process_query initial_state")
-
-            # Run workflow
+            initial_state = AgentState(
+                query=query,
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
+            
             config = {
                 "configurable": {
                     "thread_id": str(uuid.uuid4()),
@@ -636,23 +576,24 @@ class MultiAgentFinancialRAG:
                     final_result = chunk
 
             if not final_result:
-                return {
-                    "query": query,
-                    "error": "No response from workflow",
-                    "final_response": "The system did not generate a response."
-                }
+                return AgentState(
+                    query=query,
+                    error="No response from workflow",
+                    final_response="The system did not generate a response.",
+                    timestamp=self.init_time,
+                    user=self.user_login
+                ).to_dict()
 
-            debug_state(final_result, "process_query final_result")
             return final_result
 
         except Exception as e:
-            error_state = {
-                "query": query,
-                "error": f"Workflow error: {str(e)}",
-                "final_response": "An error occurred while processing your request."
-            }
-            debug_state(error_state, "process_query error")
-            return error_state
+            return AgentState(
+                query=query,
+                error=f"Workflow error: {str(e)}",
+                final_response="An error occurred while processing your request.",
+                timestamp=self.init_time,
+                user=self.user_login
+            ).to_dict()
 
 # --------------------------------------------------------------------------- #
 # 6.  Streamlit Helper                                                        #
